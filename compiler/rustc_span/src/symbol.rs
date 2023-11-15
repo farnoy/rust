@@ -1531,6 +1531,7 @@ symbols! {
         simd_gt,
         simd_insert,
         simd_le,
+        simd_load,
         simd_lt,
         simd_mul,
         simd_ne,

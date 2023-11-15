@@ -1492,6 +1492,100 @@ fn generic_simd_intrinsic<'ll, 'tcx>(
         return Ok(v);
     }
 
+    if name == sym::simd_load {
+        // simd_load(values: <N x T>, pointer: *_ T, mask: <N x i{M}>) -> <N x T>
+        // * N: number of elements in the input vectors
+        // * T: type of the element to load
+        // * M: any integer width is supported, will be truncated to i1
+
+        // The first argument is
+        let (_, element_ty0) = require_simd!(in_ty, SimdFirst);
+
+        // The element type of the second argument must be a signed integer type of any width:
+        let (mask_len, element_ty2) = require_simd!(arg_tys[2], SimdSecond);
+        require_simd!(ret_ty, SimdReturn);
+
+        // Of the same length:
+        require!(
+            in_len == mask_len,
+            InvalidMonomorphization::ThirdArgumentLength {
+                span,
+                name,
+                in_len,
+                in_ty,
+                arg_ty: arg_tys[2],
+                out_len: mask_len
+            }
+        );
+
+        // The return type must match the first argument type
+        require!(
+            ret_ty == in_ty,
+            InvalidMonomorphization::ExpectedReturnType { span, name, in_ty, ret_ty }
+        );
+
+        // Pointer type must match the element type
+        require!(
+            matches!(
+                arg_tys[1].kind(),
+                ty::RawPtr(p) if p.ty == in_elem && p.ty.kind() == element_ty0.kind()
+            ),
+            InvalidMonomorphization::ExpectedElementType {
+                span,
+                name,
+                expected_element: in_elem,
+                second_arg: arg_tys[1],
+                in_elem,
+                in_ty,
+                mutability: ExpectedPointerMutability::Not,
+            }
+        );
+
+        // Mask needs to be an integer type
+        match element_ty2.kind() {
+            ty::Int(_) => (),
+            _ => {
+                return_error!(InvalidMonomorphization::ThirdArgElementType {
+                    span,
+                    name,
+                    expected_element: element_ty2,
+                    third_arg: arg_tys[2]
+                });
+            }
+        }
+
+        // Alignment of T, must be a constant integer value:
+        let alignment_ty = bx.type_i32();
+        let alignment = bx.const_i32(bx.align_of(in_ty).bytes() as i32);
+
+        // Truncate the mask vector to a vector of i1s:
+        let (mask, mask_ty) = {
+            let i1 = bx.type_i1();
+            let i1xn = bx.type_vector(i1, mask_len);
+            (bx.trunc(args[2].immediate(), i1xn), i1xn)
+        };
+
+        let llvm_pointer = bx.type_ptr();
+
+        // Type of the vector of elements:
+        let llvm_elem_vec_ty = llvm_vector_ty(bx, in_elem, mask_len);
+        let llvm_elem_vec_str = llvm_vector_str(bx, in_elem, mask_len);
+
+        let llvm_intrinsic = format!("llvm.masked.load.{llvm_elem_vec_str}.p0");
+        let fn_ty = bx
+            .type_func(&[llvm_pointer, alignment_ty, mask_ty, llvm_elem_vec_ty], llvm_elem_vec_ty);
+        let f = bx.declare_cfn(&llvm_intrinsic, llvm::UnnamedAddr::No, fn_ty);
+        let v = bx.call(
+            fn_ty,
+            None,
+            None,
+            f,
+            &[args[1].immediate(), alignment, mask, args[0].immediate()],
+            None,
+        );
+        return Ok(v);
+    }
+
     if name == sym::simd_scatter {
         // simd_scatter(values: <N x T>, pointers: <N x *mut T>,
         //             mask: <N x i{M}>) -> ()
